@@ -24,7 +24,7 @@ dislikes = pd.get_dummies(dislikes, columns=cat, drop_first=True)
 
 # Create a new year variable in favor of the upload date
 dislikes['upload_date'] = pd.to_datetime(dislikes['upload_date'], errors='coerce')
-dislikes['year'] = dislikes['upload_date'].dt.year
+dislikes['age'] = (pd.Timestamp.today() - dislikes["upload_date"]).dt.days
 
 dislikes = dislikes.drop('upload_date', axis=1)
 dislikes = dislikes.dropna()
