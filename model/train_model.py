@@ -4,44 +4,57 @@ import statsmodels.api as sm
 
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import cross_val_score
+from sklearn.metrics import mean_squared_error
 from itertools import combinations
+from copy import deepcopy
 
-dislikes = pd.read_json('../data/raw/train.json', lines=True)
+dislikes = pd.read_csv('../data/raw/train.csv')
+test = pd.read_csv("../data/raw/test.csv")
 
-# Keep only entries with more than 2,000 subscribers
-dislikes = dislikes[dislikes['uploader_sub_count'] > 2_000]
-
-# Select only relevant features
-dislikes = dislikes[['upload_date', 'uploader_sub_count', 'view_count',
-                     'like_count', 'dislike_count', 'has_subtitles',
-                     'is_ads_enabled', 'is_comments_enabled']]
-
-# Encoding
-cat = ['has_subtitles', 'is_ads_enabled', 'is_comments_enabled']
-dislikes = pd.get_dummies(dislikes, columns=cat, drop_first=True)
-
-# Feature Engineering
-
-# Create a new year variable in favor of the upload date
+# Convert to pandas datetime to access additional attributes
 dislikes['upload_date'] = pd.to_datetime(dislikes['upload_date'], errors='coerce')
+# Obtain the number of days
 dislikes['age'] = (pd.Timestamp.today() - dislikes["upload_date"]).dt.days
 
-dislikes = dislikes.drop('upload_date', axis=1)
+dislikes = dislikes.drop(dislikes[['upload_date', 'title', 'description']], axis=1)
 dislikes = dislikes.dropna()
 
-# Make interaction terms to better capture the relationship between sub and dislike count
+# Convert to pandas datetime to access additional attributes
+test['upload_date'] = pd.to_datetime(test['upload_date'], errors='coerce')
+# Obtain the number of days
+test['age'] = (pd.Timestamp.today() - test["upload_date"]).dt.days
+
+test = test.drop(test[['upload_date', 'title', 'description']], axis=1)
+test = test.dropna()
+
+test_sub = deepcopy(test)
+
+# Square the sub count
 dislikes['uploader_sub_count^2'] = dislikes['uploader_sub_count'] ** 2
-
-log_uploader_sub_count = np.log(dislikes['uploader_sub_count'])
-dislikes['log_uploader_sub_count^2'] = log_uploader_sub_count ** 2
-
+# Square the like count
+dislikes['like_count^2'] = dislikes['like_count'] ** 2
+# Create an interaction term between sub count and view count
 dislikes['sub_count*view_count'] = dislikes['uploader_sub_count'] * dislikes['view_count']
 
-# Best Subset Selection
+# Square the sub count
+test_sub['uploader_sub_count^2'] = test_sub['uploader_sub_count'] ** 2
+# Square the like count
+test_sub['like_count^2'] = test_sub['like_count'] ** 2
+# Create an interaction term between sub count and view count
+test_sub['sub_count*view_count'] = test_sub['uploader_sub_count'] * test_sub['view_count']
+
+# Encoding
+cat = ['has_subtitles', 'is_comments_enabled', 'is_ads_enabled']
+
+dislikes = pd.get_dummies(dislikes, columns=cat, drop_first=True)
+test_sub = pd.get_dummies(test_sub, columns=cat, drop_first=True)
+
+# Split into train/test
 y = dislikes['dislike_count'] # Response vector
 X = dislikes.drop('dislike_count', axis=1) # Explanatory Matrix
 X = sm.add_constant(X)
 
+# Best Subset Selection
 # Courtesy of https://www.science.smith.edu/~jcrouser/SDS293/labs/lab8-py.html
 def process_subset(col_names):
     # Fit model on feature set and calculate RSS and BIC
@@ -54,6 +67,7 @@ def process_subset(col_names):
     BIC = regr.bic
 
     return {"model": model, "RSS": RSS, "BIC": BIC}
+
 def best_subset_selection(k):
     results = []
 
@@ -80,10 +94,23 @@ min_bic_idx = best_models['BIC'].idxmin() # Find the smallest BIC among our "bes
 best_model = best_models.loc[min_bic_idx, "model"].fit()
 
 best_params = best_model.params.index.tolist() # Choose "best" parameters
+
 X = X[best_params] # Filter training set
+test_sub = test_sub[best_params] # Filter test set
 
 lr = LinearRegression()
-results = cross_val_score(lr, X, y, scoring='neg_root_mean_squared_error', cv=10)
-rmse = -results.mean()
+lr_results = cross_val_score(lr, X, y, scoring='neg_root_mean_squared_error', cv=10)
+lr_rmse = -lr_results.mean()
+print(f"CV RMSE: {lr_rmse}") # 452.556
 
-print(rmse)
+# Fit the model
+lr.fit(X, y)
+
+# Make predictions
+y_pred = lr.predict(test_sub)
+y_pred[y_pred < 0] = 0
+
+def rmse(y_true, y_pred):
+    return np.sqrt(mean_squared_error(y_true, y_pred))
+
+print(f"TRUE RMSE: {rmse(test['dislike_count'], y_pred)}") # 542.980
