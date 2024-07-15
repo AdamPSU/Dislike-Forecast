@@ -1,15 +1,18 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+import seaborn as sns 
+import matplotlib.pyplot as plt 
 
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Lasso
 from sklearn.model_selection import cross_val_score
 from sklearn.metrics import mean_squared_error
-from itertools import combinations
-from copy import deepcopy
+from copy import deepcopy 
 
-dislikes = pd.read_csv('../data/raw/train.csv')
-test = pd.read_csv("../data/raw/test.csv")
+# Load the train set
+dislikes = pd.read_csv("/path/to/train.csv")
+# Load the test set
+test = pd.read_csv("/path/to/test.csv")
 
 # Convert to pandas datetime to access additional attributes
 dislikes['upload_date'] = pd.to_datetime(dislikes['upload_date'], errors='coerce')
@@ -26,91 +29,87 @@ test['age'] = (pd.Timestamp.today() - test["upload_date"]).dt.days
 
 test = test.drop(test[['upload_date', 'title', 'description']], axis=1)
 test = test.dropna()
+test_sub = deepcopy(test) # To ensure original copy remains unchanged
+test_sub = test_sub.drop('dislike_count', axis=1)
 
-test_sub = deepcopy(test)
+dislikes[dislikes['uploader_sub_count'] < 0] = 0 
 
-# Square the sub count
-dislikes['uploader_sub_count^2'] = dislikes['uploader_sub_count'] ** 2
-# Square the like count
-dislikes['like_count^2'] = dislikes['like_count'] ** 2
-# Create an interaction term between sub count and view count
-dislikes['sub_count*view_count'] = dislikes['uploader_sub_count'] * dislikes['view_count']
+# Reciprocate the sub count 
+dislikes['uploader_sub_count_log'] = np.log1p(dislikes['uploader_sub_count'])
+dislikes = dislikes.drop('uploader_sub_count', axis=1)
 
-# Square the sub count
-test_sub['uploader_sub_count^2'] = test_sub['uploader_sub_count'] ** 2
-# Square the like count
-test_sub['like_count^2'] = test_sub['like_count'] ** 2
-# Create an interaction term between sub count and view count
-test_sub['sub_count*view_count'] = test_sub['uploader_sub_count'] * test_sub['view_count']
+test_sub[test_sub['uploader_sub_count'] < 0] = 0 
+
+# Reciprocate the sub count 
+test_sub['uploader_sub_count_log'] = np.log1p(test_sub['uploader_sub_count'])
+test_sub = test_sub.drop('uploader_sub_count', axis=1)
 
 # Encoding
-cat = ['has_subtitles', 'is_comments_enabled', 'is_ads_enabled']
+cat = ['has_subtitles', 'is_comments_enabled', 'is_ads_enabled', 'is_live_content',
+       'is_age_limit']
 
 dislikes = pd.get_dummies(dislikes, columns=cat, drop_first=True)
 test_sub = pd.get_dummies(test_sub, columns=cat, drop_first=True)
 
-# Split into train/test
-y = dislikes['dislike_count'] # Response vector
-X = dislikes.drop('dislike_count', axis=1) # Explanatory Matrix
-X = sm.add_constant(X)
+# Prepare train/test data 
+X = dislikes.drop('dislike_count', axis=1)
+y = dislikes['dislike_count']
 
-# Best Subset Selection
-# Courtesy of https://www.science.smith.edu/~jcrouser/SDS293/labs/lab8-py.html
-def process_subset(col_names):
-    # Fit model on feature set and calculate RSS and BIC
-    subset = X[list(col_names)].astype(int)
+# Cross Validation & Model Testing
 
-    model = sm.OLS(y, subset)
-    regr = model.fit()
+lr = LinearRegression() 
+linear_cv = cross_val_score(lr, X, y, cv=10, scoring='neg_root_mean_squared_error')
+rmse = -linear_cv.mean() 
 
-    RSS = regr.ssr
-    BIC = regr.bic
+print(f'With linear regression, our rmse is {round(rmse, 4)}.') # 406.0525
 
-    return {"model": model, "RSS": RSS, "BIC": BIC}
+alphas = [0.01, 0.1, 1, 10, 100]
+param_grid = {'alpha': alphas}
 
-def best_subset_selection(k):
-    results = []
+# ------------------------------------------------------------------ 
 
-    for subset in combinations(list(X), k):
-        results.append(process_subset(subset))
+lasso = Lasso()
 
-    # Wrap everything up in a nice dataframe
-    models = pd.DataFrame(results)
+# Set up Grid Search to find best alpha value
+lasso_cv = GridSearchCV(lasso, param_grid, cv=10, scoring='neg_root_mean_squared_error')
+lasso_cv.fit(X, y)
 
-    # Choose the model with the smallest RSS
-    best_model = models.loc[models['RSS'].argmin()]
+# Get the best parameters and rmse
+lasso_best_lambda = lasso_cv.best_params_['alpha'] # 0.1
+rmse = -lasso_cv.best_score_  # Note the negative sign to convert back to RMSE
 
-    # Return the best model, along with some other useful information about the model
-    return best_model
+print(f'With LASSO, the rmse is {round(rmse, 4)} for a lambda of {lasso_best_lambda}.') # 406.0514, 0.1
 
-# Dataframe to store our models
-best_models = pd.DataFrame(columns=["BIC", "RSS", "model"])
+# ------------------------------------------------------------------
 
-k = len(list(X))
-for i in range(1, k):
-    best_models.loc[i] = best_subset_selection(i)
+ridge = Ridge() 
 
-min_bic_idx = best_models['BIC'].idxmin() # Find the smallest BIC among our "best models"
-best_model = best_models.loc[min_bic_idx, "model"].fit()
+ridge_cv = GridSearchCV(ridge, param_grid, cv=10, scoring='neg_root_mean_squared_error')
+ridge_cv.fit(X, y)
 
-best_params = best_model.params.index.tolist() # Choose "best" parameters
+# Get the best parameters and rmse
+ridge_best_lambda = ridge_cv.best_params_['alpha'] # 0.1
+rmse = -ridge_cv.best_score_  # Note the negative sign to convert back to RMSE
 
-X = X[best_params] # Filter training set
-test_sub = test_sub[best_params] # Filter test set
+print(f'With ridge, the rmse is {round(rmse, 4)} for a lambda of {ridge_best_lambda}.') # 406.0524, 100
 
-lr = LinearRegression()
-lr_results = cross_val_score(lr, X, y, scoring='neg_root_mean_squared_error', cv=10)
-lr_rmse = -lr_results.mean()
-print(f"CV RMSE: {lr_rmse}") # 452.556
+# Fitting & Residual Analysis 
+lr.fit(X, y) # I've chosen lr since the shrinkage methods don't seem to have strong impact
+y_pred = lr.predict(X)
+resid = y_pred - y
 
-# Fit the model
-lr.fit(X, y)
 
-# Make predictions
-y_pred = lr.predict(test_sub)
-y_pred[y_pred < 0] = 0
+# Scatter plot of residuals vs fitted values
+sns.scatterplot(x=y_pred, y=resid)
+plt.xlabel('Fitted values')
+plt.ylabel('Residuals')
+plt.title('Residuals vs Fitted', fontweight='bold')
+ 
+plt.show() # Linear Regression might not be the best model for this job
 
-def rmse(y_true, y_pred):
-    return np.sqrt(mean_squared_error(y_true, y_pred))
+# Predictions
+test_pred = lr.predict(test_sub)
+test['prediction'] = test_pred 
 
-print(f"TRUE RMSE: {rmse(test['dislike_count'], y_pred)}") # 542.980
+final = test[['dislike_count', 'prediction']]
+
